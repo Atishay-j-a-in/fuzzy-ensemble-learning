@@ -1,0 +1,48 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+
+# Jupyter and local development files
+.ipynb_checkpoints/
+.vscode/
+.idea/
+*.log
+.env
+.env.*
+
+# TensorFlow/Keras and generated local artifacts
+keras_home/
+*.keras
+*.npy
+first_10_xception_predictions.csv
+next_10_xception_predictions.csv
+
+# Generated experiment tables; keep the repository's ensemble inputs below
+*.csv
+!Fuzzy Ensemble/Val_prediction_matrix.csv
+!Fuzzy Ensemble/Test_prediction_matrix.csv
+!Fuzzy Ensemble/Binary_confidence_matrix.csv
+!Fuzzy Ensemble/Four_confidence_matrix.csv
+
+# Downloaded archives and raw slide/image formats
+*.zip
+*.tar
+*.tar.gz
+*.svs
+*.tif
+*.tiff
+
+# Large local datasets and extracted slide data
+ICIAR2018_BACH_Challenge_TestDataset/
+data/
+datasets/
+extracted_features/
+
+# Operating-system files
+Thumbs.db
+.DS_Store
