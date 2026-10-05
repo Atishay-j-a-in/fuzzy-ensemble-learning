@@ -1,5 +1,6 @@
 import io
 import os
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -10,6 +11,18 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import jobs
+from jobs import (
+    cancel_requested,
+    create_job,
+    finish_job,
+    get_job,
+    get_startup_progress,
+    make_progress_callback,
+    prune_jobs,
+    request_cancel,
+    update_job,
+)
 from model_service import (
     BreastCancerFuzzyEnsembleService,
     CLASS_NAMES,
@@ -79,8 +92,66 @@ def health_check():
         "models_count": 5,
         "ensemble_active": True,
         "classes": CLASS_NAMES,
+        "startup": get_startup_progress(),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
     }
+
+
+@app.get("/api/startup/progress")
+def startup_progress():
+    """Cold-start progress: which of the 5 backbones is loading right now."""
+    prune_jobs()
+    return get_startup_progress()
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job_status(job_id: str):
+    prune_jobs()
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    return job
+
+
+@app.delete("/api/jobs/{job_id}")
+def cancel_job(job_id: str):
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    request_cancel(job_id)
+    return {"job_id": job_id, "cancel_requested": True}
+
+
+def _run_batch_job(job_id: str, image_items, mode: str):
+    cb = make_progress_callback(job_id)
+    try:
+        update_job(job_id, status="running", stage="inference",
+                   message=f"Running {mode} inference on {len(image_items)} image(s)…")
+        result = model_service.predict_image_batch(
+            image_items, mode=mode, progress_cb=cb,
+            cancel_flag=lambda: cancel_requested(job_id))
+        if cancel_requested(job_id):
+            finish_job(job_id, cancelled=True)
+        else:
+            finish_job(job_id, result=result)
+    except Exception as e:
+        finish_job(job_id, error=str(e))
+
+
+def _run_sample_job(job_id: str, limit: int, offset: int, mode: str):
+    cb = make_progress_callback(job_id)
+    try:
+        update_job(job_id, status="running", stage="loading",
+                   message=f"Loading sample dataset (limit={limit}, offset={offset})…")
+        result = model_service.predict_sample_dataset(
+            limit=limit, offset=offset, mode=mode, progress_cb=cb,
+            cancel_flag=lambda: cancel_requested(job_id))
+        if cancel_requested(job_id):
+            finish_job(job_id, cancelled=True)
+        else:
+            finish_job(job_id, result=result)
+    except Exception as e:
+        finish_job(job_id, error=str(e))
 
 
 @app.get("/api/model/info")
@@ -96,7 +167,7 @@ def get_model_info():
         ],
         "fuzzy_densities": FUZZY_DENSITIES,
         "input_resolution": "512 x 512 x 3 (RGB)",
-        "preprocessing": "Macenko Stain Normalization & Bilinear Resampling",
+        "preprocessing": "RGB bilinear resampling to 512x512 (dense heads were trained on Macenko-normalized data; no stain renormalization at inference)",
         "classes": [
             {
                 "id": i,
@@ -129,7 +200,7 @@ def get_model_info():
             "title": "Fuzzy ensemble of deep learning models using choquet fuzzy integral, coalition game and information theory for breast cancer histology classification",
             "authors": "Pratik Bhowal, Subhankar Sen, Juan D. Velasquez Silva, Ram Sarkar",
             "journal": "Expert Systems with Applications",
-            "year": 2021,
+            "year": 2022,
             "publisher": "Elsevier",
             "doi_or_page": "116167"
         }
@@ -212,6 +283,71 @@ def predict_sample_dataset(limit: int = Query(10, ge=1, le=100), offset: int = Q
         return model_service.predict_sample_dataset(limit=limit, offset=offset, mode=mode)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sample dataset prediction error: {str(e)}")
+
+
+@app.post("/api/predict/batch/async")
+async def predict_batch_async(files: List[UploadFile] = File(...), mode: str = Query("ensemble")):
+    """Non-blocking batch inference. Returns {job_id} immediately; poll GET /api/jobs/{job_id}.
+
+    Sync POST /api/predict/batch is untouched for backward compatibility."""
+    try:
+        if not files:
+            raise HTTPException(status_code=400, detail="No files provided.")
+
+        # Single ZIP: expand in-request (fast) so the worker sees a concrete total.
+        filenames = [(f.filename or "") for f in files]
+        if len(files) == 1 and filenames[0].lower().endswith(".zip"):
+            import zipfile as _zip
+            zip_bytes = await files[0].read()
+            image_items = []
+            with _zip.ZipFile(io.BytesIO(zip_bytes)) as z:
+                for info in z.infolist():
+                    if info.is_dir():
+                        continue
+                    from pathlib import Path as _P
+                    if _P(info.filename).suffix.lower() in {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"} \
+                            and not info.filename.startswith("__MACOSX"):
+                        image_items.append((_P(info.filename).name, z.read(info.filename)))
+            image_items.sort(key=lambda x: x[0])
+        else:
+            image_items = []
+            for file in files:
+                content = await file.read()
+                if content:
+                    image_items.append((file.filename or "upload", content))
+
+        if not image_items:
+            raise HTTPException(status_code=400, detail="No valid image files found in upload.")
+
+        job_id = create_job("batch", len(image_items), mode)
+        thread = threading.Thread(target=_run_batch_job, args=(job_id, image_items, mode), daemon=True)
+        thread.start()
+        return {"job_id": job_id, "total": len(image_items), "mode": mode}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Async batch submit error: {str(e)}")
+
+
+@app.post("/api/predict/sample-dataset/async")
+def predict_sample_dataset_async(limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0),
+                                 mode: str = Query("ensemble")):
+    """Non-blocking sample-dataset inference. Returns {job_id} immediately."""
+    try:
+        if not DEFAULT_TEST_DIR.exists():
+            raise HTTPException(status_code=404, detail="Sample dataset not found on server.")
+        image_paths = sorted(DEFAULT_TEST_DIR.glob("test*.tif"), key=lambda p: int(p.stem[4:]))
+        total = len(image_paths[offset: offset + limit])
+        if total == 0:
+            raise HTTPException(status_code=404, detail="No sample images in requested range.")
+        job_id = create_job("sample-dataset", total, mode)
+        thread = threading.Thread(target=_run_sample_job, args=(job_id, limit, offset, mode), daemon=True)
+        thread.start()
+        return {"job_id": job_id, "total": total, "mode": mode, "limit": limit, "offset": offset}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Async sample submit error: {str(e)}")
 
 
 @app.post("/api/export/csv")

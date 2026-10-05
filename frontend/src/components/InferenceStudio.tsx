@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   UploadCloud, 
   FileArchive, 
@@ -15,7 +15,9 @@ import {
   ShieldAlert,
   Info
 } from 'lucide-react';
-import { BatchPredictionResponse } from '../types';
+import { BatchPredictionResponse, JobStatus } from '../types';
+import { useJobPolling } from '../hooks/useJobPolling';
+import { ProgressPanel } from './ProgressPanel';
 
 interface InferenceStudioProps {
   onPredictionsComplete: (response: BatchPredictionResponse) => void;
@@ -24,6 +26,10 @@ interface InferenceStudioProps {
   onLoadDemo: (limit: number) => void;
   inferenceMode: 'ensemble' | 'xception';
   setInferenceMode: (mode: 'ensemble' | 'xception') => void;
+  demoJob?: JobStatus | null;
+  demoPollError?: string | null;
+  onCancelDemoJob?: () => Promise<void>;
+  demoError?: string | null;
 }
 
 export const InferenceStudio: React.FC<InferenceStudioProps> = ({
@@ -33,12 +39,39 @@ export const InferenceStudio: React.FC<InferenceStudioProps> = ({
   onLoadDemo,
   inferenceMode,
   setInferenceMode,
+  demoJob,
+  demoPollError,
+  onCancelDemoJob,
+  demoError,
 }) => {
   const [dragActive, setDragActive] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusStep, setStatusStep] = useState<string>('');
+  const [uploadJobId, setUploadJobId] = useState<string | null>(null);
+  const { job: uploadJob, error: uploadPollError, cancel: cancelUploadJob } = useJobPolling(uploadJobId);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Complete async job when the backend reports success/failure.
+  useEffect(() => {
+    if (!uploadJobId || !uploadJob) return;
+    if (uploadJob.status === 'succeeded' && uploadJob.result) {
+      onPredictionsComplete(uploadJob.result);
+      setIsLoading(false);
+      setStatusStep('');
+      setUploadJobId(null);
+    } else if (uploadJob.status === 'failed') {
+      setErrorMsg(uploadJob.error || 'Backend inference job failed.');
+      setIsLoading(false);
+      setStatusStep('');
+      setUploadJobId(null);
+    } else if (uploadJob.status === 'cancelled') {
+      setErrorMsg('Inference job cancelled.');
+      setIsLoading(false);
+      setStatusStep('');
+      setUploadJobId(null);
+    }
+  }, [uploadJob, uploadJobId, onPredictionsComplete, setIsLoading]);
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -98,6 +131,21 @@ export const InferenceStudio: React.FC<InferenceStudioProps> = ({
     }
   };
 
+  const runSyncUploadInference = async (formData: FormData) => {
+    const response = await fetch(`/api/predict/batch?mode=${inferenceMode}`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: 'Inference request failed' }));
+      throw new Error(err.detail || `Server error status: ${response.status}`);
+    }
+
+    const data: BatchPredictionResponse = await response.json();
+    onPredictionsComplete(data);
+  };
+
   const runUploadInference = async () => {
     if (selectedFiles.length === 0) {
       setErrorMsg('Please select at least one biopsy image or upload a dataset ZIP archive.');
@@ -106,35 +154,46 @@ export const InferenceStudio: React.FC<InferenceStudioProps> = ({
 
     setIsLoading(true);
     setErrorMsg(null);
+    setUploadJobId(null);
     setStatusStep(
       inferenceMode === 'ensemble'
-        ? 'Extracting multi-scale deep features across 5 backbones & evaluating Choquet Fuzzy Integral...'
-        : 'Harvesting Xception intermediate representations and computing 4-class classification...'
+        ? 'Uploading biopsies & queueing 5-backbone Choquet job…'
+        : 'Uploading biopsies & queueing Xception job…'
     );
 
     try {
       const formData = new FormData();
       selectedFiles.forEach((file) => formData.append('files', file));
 
-      const response = await fetch(`/api/predict/batch?mode=${inferenceMode}`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ detail: 'Inference request failed' }));
-        throw new Error(err.detail || `Server error status: ${response.status}`);
+      // Preferred path: async job + live polling (non-blocking, per-image progress).
+      try {
+        const asyncRes = await fetch(`/api/predict/batch/async?mode=${inferenceMode}`, {
+          method: 'POST',
+          body: formData,
+        });
+        if (asyncRes.ok) {
+          const { job_id } = await asyncRes.json();
+          setStatusStep('Backend accepted job — streaming per-image progress…');
+          setUploadJobId(job_id);
+          return; // completion handled by the polling effect above
+        }
+        // Non-OK (e.g. old backend without /async): fall through to sync.
+      } catch {
+        // Network-level failure of /async: fall through to legacy sync endpoint.
       }
 
-      const data: BatchPredictionResponse = await response.json();
-      onPredictionsComplete(data);
+      await runSyncUploadInference(formData);
+      setIsLoading(false);
+      setStatusStep('');
     } catch (err: any) {
       console.error('Inference error:', err);
       setErrorMsg(err.message || 'Failed to process images with the deep learning model.');
-    } finally {
       setIsLoading(false);
       setStatusStep('');
     }
+    // NOTE: no finally-reset here on purpose — the async path stays in
+    // loading state until the useJobPolling effect observes succeeded/failed,
+    // while the sync fallback resolves fully inside this try block.
   };
 
   return (
@@ -312,12 +371,22 @@ export const InferenceStudio: React.FC<InferenceStudioProps> = ({
             </div>
           )}
 
-          {/* Loading Indicator with Step Description */}
-          {isLoading && (
-            <div className="p-4 rounded-xl bg-teal-950/30 border border-teal-500/30 text-xs text-teal-200 flex items-center gap-3">
-              <RefreshCw className="w-4 h-4 animate-spin text-teal-400 shrink-0" />
-              <span>{statusStep || 'Processing input histology images through neural backbones...'}</span>
-            </div>
+          {/* Live progress: async job panel when polling, legacy spinner otherwise.
+              Upload jobs (this component) take precedence; demo/sample jobs (App) show when no upload is active. */}
+          {isLoading && (uploadJobId || demoJob) ? (
+            <ProgressPanel
+              job={uploadJob ?? demoJob ?? null}
+              pollError={uploadPollError ?? demoPollError}
+              fallbackMessage={statusStep || 'Backend accepted job — waiting for first progress heartbeat…'}
+              onCancel={uploadJobId ? cancelUploadJob : onCancelDemoJob}
+            />
+          ) : (
+            isLoading && (
+              <div className="p-4 rounded-xl bg-teal-950/30 border border-teal-500/30 text-xs text-teal-200 flex items-center gap-3">
+                <RefreshCw className="w-4 h-4 animate-spin text-teal-400 shrink-0" />
+                <span>{statusStep || 'Processing input histology images through neural backbones...'}</span>
+              </div>
+            )
           )}
 
           {/* Error Alert Box */}
@@ -349,29 +418,29 @@ export const InferenceStudio: React.FC<InferenceStudioProps> = ({
             {/* Test Suite Action Buttons */}
             <div className="space-y-2.5">
               {[
-                { 
-                  count: 10, 
-                  title: 'Run 10 Test Biopsies', 
+                {
+                  count: 10,
+                  title: 'Run 10 Test Biopsies',
                   desc: 'Fast verification (test0.tif — test9.tif)',
-                  time: '~0.6s'
+                  time: '10 images'
                 },
-                { 
-                  count: 25, 
-                  title: 'Run 25 Test Biopsies', 
+                {
+                  count: 25,
+                  title: 'Run 25 Test Biopsies',
                   desc: 'Standard cohort (test0.tif — test24.tif)',
-                  time: '~1.4s'
+                  time: '25 images'
                 },
-                { 
-                  count: 50, 
-                  title: 'Run 50 Test Biopsies', 
+                {
+                  count: 50,
+                  title: 'Run 50 Test Biopsies',
                   desc: 'Extended cohort (test0.tif — test49.tif)',
-                  time: '~2.8s'
+                  time: '50 images'
                 },
-                { 
-                  count: 100, 
-                  title: 'Run Complete 100 Biopsies', 
+                {
+                  count: 100,
+                  title: 'Run Complete 100 Biopsies',
                   desc: 'Full test dataset benchmark',
-                  time: '~5.5s'
+                  time: '100 images'
                 },
               ].map((batch) => (
                 <button
@@ -392,11 +461,22 @@ export const InferenceStudio: React.FC<InferenceStudioProps> = ({
               ))}
             </div>
 
+            {/* Sample-dataset error (e.g. Photos/ folder missing on server) */}
+            {demoError && (
+              <div className="p-4 rounded-xl bg-rose-950/40 border border-rose-500/40 text-xs text-rose-200 flex items-start gap-3">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div>
+                  <strong className="font-semibold block text-rose-300">Sample Dataset Unavailable</strong>
+                  <p className="mt-0.5 leading-relaxed">{demoError}</p>
+                </div>
+              </div>
+            )}
+
             {/* Technical Note Callout */}
             <div className="pt-4 border-t border-slate-800 text-[11px] text-slate-300 leading-relaxed flex items-start gap-2">
               <Info className="w-4 h-4 text-teal-400 shrink-0 mt-0.5" />
               <span>
-                Each sample undergoes Optical Density Macenko stain normalization before parallel feature harvesting across Xception, IRV2, IV3, VGG19, and VGG16.
+                Each sample is resized to 512&times;512 RGB before parallel feature harvesting across Xception, IRV2, IV3, VGG19, and VGG16. (Dense heads were trained on Macenko-normalized data; no stain renormalization runs at inference.)
               </span>
             </div>
           </div>

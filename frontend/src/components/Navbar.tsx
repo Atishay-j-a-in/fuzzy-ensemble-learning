@@ -12,6 +12,8 @@ import {
   Zap
 } from 'lucide-react';
 
+import type { StartupStatus } from '../types';
+
 interface NavbarProps {
   backendHealthy: boolean;
   activeTab: 'studio' | 'results' | 'architecture' | 'benchmarks' | 'citation';
@@ -19,6 +21,7 @@ interface NavbarProps {
   resultCount: number;
   inferenceMode: 'ensemble' | 'xception';
   setInferenceMode: (mode: 'ensemble' | 'xception') => void;
+  startupStatus?: StartupStatus | null;
 }
 
 interface NavTabItem {
@@ -35,6 +38,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   resultCount,
   inferenceMode,
   setInferenceMode,
+  startupStatus,
 }) => {
   const navTabs: NavTabItem[] = [
     { id: 'studio', label: 'Inference Studio', icon: Database },
@@ -140,17 +144,23 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           </div>
 
-          {/* Health Status Indicator */}
-          <div 
+          {/* Health Status Indicator (+ cold-start stage while loading) */}
+          <div
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-mono font-medium border ${
-              backendHealthy 
-                ? 'bg-emerald-950/40 text-emerald-300 border-emerald-500/30' 
+              backendHealthy
+                ? 'bg-emerald-950/40 text-emerald-300 border-emerald-500/30'
                 : 'bg-rose-950/40 text-rose-300 border-rose-500/30'
             }`}
-            title={backendHealthy ? 'FastAPI Backend Online: 5 Models & Macenko Normalizer Active' : 'Connecting to FastAPI backend...'}
+            title={backendHealthy ? 'FastAPI Backend Online: 5 Models & Macenko Normalizer Active' : (startupStatus?.message || 'Connecting to FastAPI backend...')}
           >
             <span className={`w-2 h-2 rounded-full ${backendHealthy ? 'bg-emerald-400' : 'bg-rose-400 animate-pulse'}`} />
-            <span className="hidden sm:inline">{backendHealthy ? '5 Models Active' : 'Offline'}</span>
+            <span className="hidden sm:inline">
+              {backendHealthy
+                ? '5 Models Active'
+                : startupStatus && !startupStatus.done
+                  ? `Loading ${Math.min(startupStatus.stage_index + 1, startupStatus.stage_total)}/${startupStatus.stage_total}${startupStatus.current_model ? `: ${startupStatus.current_model}` : '…'}`
+                  : 'Offline'}
+            </span>
           </div>
 
         </div>

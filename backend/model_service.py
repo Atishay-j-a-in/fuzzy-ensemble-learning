@@ -11,6 +11,11 @@ import pandas as pd
 from PIL import Image
 import tensorflow as tf
 
+try:
+    from jobs import log as progress_log, set_startup_progress
+except ImportError:  # allow `python backend/model_service.py`-style imports
+    from backend.jobs import log as progress_log, set_startup_progress
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = ROOT_DIR / "best_saved_models" / "Macenko"
 DEFAULT_TEST_DIR = ROOT_DIR / "ICIAR2018_BACH_Challenge_TestDataset" / "Photos"
@@ -95,11 +100,13 @@ class BreastCancerFuzzyEnsembleService:
 
     def _init_all_models(self):
         try:
-            print("[ModelService] Initializing 5 Deep Learning Backbones & Fuzzy Ensemble...")
+            progress_log("[ModelService] Initializing 5 Deep Learning Backbones & Fuzzy Ensemble...")
+            set_startup_progress(0, None, "Starting model load — Xception up next…")
             image_input = tf.keras.Input(shape=(512, 512, 3), name="biopsy_input_512")
 
             # 1. XCEPTION (2520 -> 256 -> 4)
-            print("[ModelService] Loading Xception...")
+            progress_log("[ModelService] Loading Xception...")
+            set_startup_progress(0, "Xception", "Loading Xception backbone (1/5)…")
             x_bb = tf.keras.applications.Xception(include_top=False, weights="imagenet", input_tensor=image_input)
             x_pool = [
                 tf.keras.layers.GlobalAveragePooling2D(name=f"x_gap_{l}")(x_bb.get_layer(l).output)
@@ -112,7 +119,8 @@ class BreastCancerFuzzyEnsembleService:
                 self.head_xception.load_weights(str(x_weights))
 
             # 2. VGG16 (1152 -> 512 -> 4)
-            print("[ModelService] Loading VGG16...")
+            progress_log("[ModelService] Loading VGG16...")
+            set_startup_progress(1, "VGG16", "Xception done — loading VGG16 backbone (2/5)…")
             v16_bb = tf.keras.applications.VGG16(include_top=False, weights="imagenet", input_tensor=image_input)
             v16_pool = [
                 tf.keras.layers.GlobalAveragePooling2D(name=f"v16_gap_{l}")(v16_bb.get_layer(l).output)
@@ -125,7 +133,8 @@ class BreastCancerFuzzyEnsembleService:
                 self.head_vgg16.load_weights(str(v16_weights))
 
             # 3. VGG19 (896 -> 256 -> 4)
-            print("[ModelService] Loading VGG19...")
+            progress_log("[ModelService] Loading VGG19...")
+            set_startup_progress(2, "VGG19", "VGG16 done — loading VGG19 backbone (3/5)…")
             v19_bb = tf.keras.applications.VGG19(include_top=False, weights="imagenet", input_tensor=image_input)
             v19_pool = [
                 tf.keras.layers.GlobalAveragePooling2D(name=f"v19_gap_{l}")(v19_bb.get_layer(l).output)
@@ -138,7 +147,8 @@ class BreastCancerFuzzyEnsembleService:
                 self.head_vgg19.load_weights(str(v19_weights))
 
             # 4. INCEPTION V3 (2320 -> 256 -> 4)
-            print("[ModelService] Loading InceptionV3...")
+            progress_log("[ModelService] Loading InceptionV3...")
+            set_startup_progress(3, "InceptionV3", "VGG19 done — loading InceptionV3 backbone (4/5)…")
             inv3_bb = tf.keras.applications.InceptionV3(include_top=False, weights="imagenet", input_tensor=image_input)
             inv3_indices = [11, 18, 28, 51, 74, 101, 120, 152, 184, 216, 249, 263, 294]
             inv3_pool = [
@@ -152,7 +162,8 @@ class BreastCancerFuzzyEnsembleService:
                 self.head_inception_v3.load_weights(str(inv3_weights))
 
             # 5. INCEPTION RESNET V2 (464 -> 256 -> 4)
-            print("[ModelService] Loading InceptionResNetV2...")
+            progress_log("[ModelService] Loading InceptionResNetV2...")
+            set_startup_progress(4, "InceptionResNetV2", "InceptionV3 done — loading InceptionResNetV2 backbone (5/5)…")
             irv2_bb = tf.keras.applications.InceptionResNetV2(include_top=False, weights="imagenet", input_tensor=image_input)
             irv2_indices = [11, 18, 275, 618]
             irv2_pool = [
@@ -166,7 +177,8 @@ class BreastCancerFuzzyEnsembleService:
                 self.head_inception_resnet_v2.load_weights(str(irv2_weights))
 
             # Warmup models
-            print("[ModelService] Warming up all models with dummy tensor...")
+            progress_log("[ModelService] Warming up all models with dummy tensor...")
+            set_startup_progress(5, "Warmup", "All 5 backbones loaded — warming up with dummy tensor…")
             dummy_input = np.zeros((1, 512, 512, 3), dtype=np.float32)
             _ = self.head_xception.predict(self.fe_xception.predict(dummy_input, verbose=0), verbose=0)
             _ = self.head_vgg16.predict(self.fe_vgg16.predict(dummy_input, verbose=0), verbose=0)
@@ -175,10 +187,12 @@ class BreastCancerFuzzyEnsembleService:
             _ = self.head_inception_resnet_v2.predict(self.fe_inception_resnet_v2.predict(dummy_input, verbose=0), verbose=0)
 
             self.is_loaded = True
-            print("[ModelService] All 5 models and Fuzzy Choquet Ensemble loaded and ready!")
+            progress_log("[ModelService] All 5 models and Fuzzy Choquet Ensemble loaded and ready!")
+            set_startup_progress(6, None, "All 5 models ready — ensemble online.", done=True)
         except Exception as e:
             self.load_error = str(e)
-            print(f"[ModelService] ERROR initializing models: {e}")
+            progress_log(f"[ModelService] ERROR initializing models: {e}")
+            set_startup_progress(0, None, f"Model load failed: {e}", error=str(e))
             self.is_loaded = False
 
     def preprocess_pil_image(self, pil_img: Image.Image) -> np.ndarray:
@@ -230,7 +244,10 @@ class BreastCancerFuzzyEnsembleService:
         prob_dict = {name: float(normalized_probs[i]) for i, name in enumerate(CLASS_NAMES)}
         return pred_id, pred_class, confidence, prob_dict
 
-    def predict_image_bytes(self, file_bytes: bytes, filename: str, mode: str = "ensemble") -> Dict[str, Any]:
+    def predict_image_bytes(self, file_bytes: bytes, filename: str, mode: str = "ensemble",
+                              model_stage_cb=None) -> Dict[str, Any]:
+        """Single-image inference. `model_stage_cb(model_name)` is optional and
+        never affects the returned payload (additive progress hook)."""
         if not self.is_loaded:
             raise RuntimeError(f"Models not loaded: {self.load_error}")
 
@@ -242,25 +259,39 @@ class BreastCancerFuzzyEnsembleService:
         img_tensor = self.preprocess_pil_image(pil_img)
         batch_input = np.expand_dims(img_tensor, axis=0)
 
+        def _stage(model_name: str) -> None:
+            try:
+                if model_stage_cb is not None:
+                    model_stage_cb(model_name)
+            except Exception:
+                pass
+
         # 1. Xception
+        _stage("Xception")
         x_feats = self.fe_xception.predict(batch_input, verbose=0)
         x_probs = self.head_xception.predict(x_feats, verbose=0)[0]
 
         # 2. VGG16
+        _stage("VGG16")
         v16_feats = self.fe_vgg16.predict(batch_input, verbose=0)
         v16_probs = self.head_vgg16.predict(v16_feats, verbose=0)[0]
 
         # 3. VGG19
+        _stage("VGG19")
         v19_feats = self.fe_vgg19.predict(batch_input, verbose=0)
         v19_probs = self.head_vgg19.predict(v19_feats, verbose=0)[0]
 
         # 4. Inception V3
+        _stage("InceptionV3")
         inv3_feats = self.fe_inception_v3.predict(batch_input, verbose=0)
         inv3_probs = self.head_inception_v3.predict(inv3_feats, verbose=0)[0]
 
         # 5. Inception ResNet V2
+        _stage("InceptionResNetV2")
         irv2_feats = self.fe_inception_resnet_v2.predict(batch_input, verbose=0)
         irv2_probs = self.head_inception_resnet_v2.predict(irv2_feats, verbose=0)[0]
+
+        _stage("Choquet fusion")
 
         all_model_probs = {
             "Xception": x_probs,
@@ -321,21 +352,46 @@ class BreastCancerFuzzyEnsembleService:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
 
-    def predict_image_batch(self, image_items: List[Tuple[str, bytes]], mode: str = "ensemble") -> Dict[str, Any]:
+    def predict_image_batch(self, image_items: List[Tuple[str, bytes]], mode: str = "ensemble",
+                              progress_cb=None, cancel_flag=None) -> Dict[str, Any]:
+        """Batch inference. `progress_cb(done, total, filename, model, stage)` and
+        `cancel_flag()` are optional; when omitted behaviour is identical to before."""
         if not self.is_loaded:
             raise RuntimeError(f"Models not loaded: {self.load_error}")
 
         total_start = time.time()
         results = []
         class_counts = {name: 0 for name in CLASS_NAMES}
+        total = len(image_items)
 
-        for filename, file_bytes in image_items:
+        def _emit(done_count: int, filename: Optional[str], model_name: Optional[str],
+                 stage: str = "inference") -> None:
             try:
-                res = self.predict_image_bytes(file_bytes, filename, mode=mode)
+                if progress_cb is not None:
+                    progress_cb(done_count, total, filename, model_name, stage)
+            except Exception:
+                pass
+
+        for idx, (filename, file_bytes) in enumerate(image_items, start=1):
+            try:
+                if cancel_flag is not None:
+                    try:
+                        if cancel_flag():
+                            progress_log(f"[ModelService] Batch cancelled at image {idx}/{total}.")
+                            break
+                    except Exception:
+                        pass
+                _emit(idx - 1, filename, "Preprocess", "preprocess")
+
+                def _model_cb(model_name: str, _idx: int = idx, _fn: str = filename) -> None:
+                    _emit(_idx - 1, _fn, model_name, "inference")
+
+                res = self.predict_image_bytes(file_bytes, filename, mode=mode, model_stage_cb=_model_cb)
                 results.append(res)
                 class_counts[res["predicted_class"]] += 1
+                _emit(idx, filename, res.get("predicted_class"), "done-image")
             except Exception as e:
-                print(f"[ModelService] Error evaluating {filename}: {e}")
+                progress_log(f"[ModelService] Error evaluating {filename}: {e}")
 
         total_elapsed = round((time.time() - total_start) * 1000, 2)
         avg_latency = round(total_elapsed / max(1, len(results)), 2)
@@ -358,7 +414,8 @@ class BreastCancerFuzzyEnsembleService:
             }
         }
 
-    def predict_zip_archive(self, zip_bytes: bytes, mode: str = "ensemble") -> Dict[str, Any]:
+    def predict_zip_archive(self, zip_bytes: bytes, mode: str = "ensemble",
+                              progress_cb=None, cancel_flag=None) -> Dict[str, Any]:
         valid_extensions = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
         image_items = []
 
@@ -373,9 +430,10 @@ class BreastCancerFuzzyEnsembleService:
                     image_items.append((filename, file_data))
 
         image_items.sort(key=lambda x: x[0])
-        return self.predict_image_batch(image_items, mode=mode)
+        return self.predict_image_batch(image_items, mode=mode, progress_cb=progress_cb, cancel_flag=cancel_flag)
 
-    def predict_sample_dataset(self, limit: int = 10, offset: int = 0, mode: str = "ensemble") -> Dict[str, Any]:
+    def predict_sample_dataset(self, limit: int = 10, offset: int = 0, mode: str = "ensemble",
+                               progress_cb=None, cancel_flag=None) -> Dict[str, Any]:
         if not DEFAULT_TEST_DIR.exists():
             raise FileNotFoundError(f"Test dataset directory not found at: {DEFAULT_TEST_DIR}")
 
@@ -387,7 +445,7 @@ class BreastCancerFuzzyEnsembleService:
             with open(p, "rb") as f:
                 image_items.append((p.name, f.read()))
 
-        return self.predict_image_batch(image_items, mode=mode)
+        return self.predict_image_batch(image_items, mode=mode, progress_cb=progress_cb, cancel_flag=cancel_flag)
 
     def generate_csv(self, items: List[Dict[str, Any]]) -> str:
         df_data = []

@@ -109,7 +109,7 @@ Model outputs are research results and must not be used as a medical diagnosis.
 Bhowal, P., Sen, S., Silva, J. D. V., and Sarkar, R.
 Fuzzy ensemble of deep learning models using choquet fuzzy integral,
 coalition game and information theory for breast cancer histology classification.
-Expert Systems with Applications, 2021.
+Expert Systems with Applications, vol. 190, 116167, 2022. (Published online 2021.)
 ```
 
 ## License

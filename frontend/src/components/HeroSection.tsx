@@ -38,7 +38,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             Fuzzy Ensemble & <span className="bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 via-purple-300 to-teal-300">Xception Deep AI</span> for Breast Cancer Histology
           </h1>
           <p className="mt-6 text-base sm:text-lg text-slate-300 leading-relaxed font-normal">
-            Automated 4-class histopathology diagnostic platform powered by deep multi-scale feature harvesting, Macenko stain normalization, and fuzzy game-theoretic decision fusion.
+            Automated 4-class histopathology diagnostic platform powered by deep multi-scale feature harvesting, Macenko-trained dense heads, and fuzzy game-theoretic decision fusion.
           </p>
         </div>
 

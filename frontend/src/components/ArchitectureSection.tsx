@@ -118,17 +118,17 @@ export const ArchitectureSection: React.FC = () => {
     {
       id: 'macenko',
       stageNumber: '02',
-      title: 'Macenko Optical Density Normalization',
-      badge: 'SVD Deconvolution',
+      title: 'Stain Handling: Macenko (Training) + RGB Resampling (Inference)',
+      badge: 'Training vs Deployment',
       color: 'border-indigo-500/50 text-indigo-400',
-      summary: 'Converts RGB color space into Optical Density (OD) vectors to isolate Hematoxylin and Eosin stain vectors via Singular Value Decomposition (SVD).',
+      summary: 'The released dense heads were trained on Macenko-normalized slides (OD-space SVD stain deconvolution). This deployment does NOT re-normalize: live inference only converts to RGB and bilinearly resamples to 512x512 (see backend preprocess_pil_image).',
       details: {
-        'Mathematical Space': 'OD = -log10((I + 1) / 255)',
-        'Deconvolution': 'SVD decomposition on optical density vectors with OD > 0.15 threshold',
-        'Purpose': 'Eliminates staining batch variability across different pathology laboratories',
-        'Output': 'Normalized RGB tensor calibrated against reference clinical staining matrix',
+        'Training-Time': 'Macenko OD = -log10((I + 1) / 255) + SVD stain-vector deconvolution (weights in best_saved_models/Macenko/)',
+        'Inference-Time (This App)': "PIL convert('RGB') -> resize (512, 512, BILINEAR) -> /255.0 — no OD/SVD step",
+        'Practical Note': 'Expect a train/inference skew on strongly off-stain labs; re-normalize inputs or retrain heads for full Macenko parity',
+        'Output': 'Float32 tensor (512, 512, 3) fed to all 5 backbones',
       },
-      codeSnippet: `# Convert RGB to Optical Density\nOD = -np.log10((I.astype(np.float32) + 1) / 255.0)\nODhat = OD[~np.any(OD < beta, axis=1)]\n_, V = np.linalg.eigh(np.cov(ODhat, rowvar=False))`
+      codeSnippet: `# What this deployment ACTUALLY runs (backend/model_service.py)\nrgb = Image.open(path).convert('RGB').resize((512, 512), Image.BILINEAR)\ntensor = np.asarray(rgb, dtype=np.float32) / 255.0  # no Macenko step`
     },
     {
       id: 'backbones',
@@ -139,7 +139,7 @@ export const ArchitectureSection: React.FC = () => {
       summary: 'Parallel execution across 5 deep convolutional architectures initialized with pre-trained ImageNet representations.',
       details: {
         'Architectures': 'Xception (20.8M), InceptionResNetV2 (54.3M), InceptionV3 (21.8M), VGG19 (20.0M), VGG16 (14.7M)',
-        'Fine-Tuning': 'First 95 layers frozen; subsequent convolutional stages fine-tuned on normalized BACH dataset',
+        'Fine-Tuning (per-checkpoint)': 'Xception: first 95 layers frozen; VGG16: up to block15; VGG19: up to block17; InceptionV3: up to layer 197 (see *_upto*frozen weights); IRV2 deployed head uses a temperature-normalized variant',
         'Transfer Strategy': 'Multi-scale intermediate receptive field harvesting',
       },
       codeSnippet: `xception = tf.keras.applications.Xception(include_top=False, weights="imagenet")\nirv2 = tf.keras.applications.InceptionResNetV2(include_top=False, weights="imagenet")\niv3 = tf.keras.applications.InceptionV3(include_top=False, weights="imagenet")`
@@ -152,10 +152,10 @@ export const ArchitectureSection: React.FC = () => {
       color: 'border-teal-500/50 text-teal-400',
       summary: 'Instead of taking only final bottleneck features, intermediate activation maps are tapped across Early, Middle, and Exit flows to capture cytology at multiple scales.',
       details: {
-        'Low-Level Tap': 'block4_sepconv1_act -> GlobalAveragePooling2D (728 dims) -> Nuclear chromatin texture',
+        'Low-Level Tap': 'block4_sepconv1_act -> GlobalAveragePooling2D (256 dims) -> Nuclear chromatin texture',
         'Mid-Level Tap': 'block5_sepconv1_act -> GlobalAveragePooling2D (728 dims) -> Glandular architecture',
-        'High-Level Tap': 'block14_sepconv1 -> GlobalAveragePooling2D (1064 dims) -> Stromal invasion patterns',
-        'Concatenation': 'Concatenate([x1, x2, x3]) = 2,520-dimensional composite feature vector',
+        'High-Level Tap': 'block14_sepconv1 -> GlobalAveragePooling2D (1536 dims) -> Stromal invasion patterns',
+        'Concatenation': 'Concatenate([x1, x2, x3]) = 2,520-dimensional composite feature vector (verified against live backbone shapes)',
       },
       codeSnippet: `taps = ['block4_sepconv1_act', 'block5_sepconv1_act', 'block14_sepconv1']\npooled = [GlobalAveragePooling2D()(xception.get_layer(name).output) for name in taps]\ncomposite_features = Concatenate()(pooled) # shape: (batch, 2520)`
     },
@@ -163,15 +163,15 @@ export const ArchitectureSection: React.FC = () => {
       id: 'heads',
       stageNumber: '05',
       title: 'Dense Classification Heads',
-      badge: 'Dense(512) -> Dropout(0.5)',
+      badge: 'Dense(256/512) -> Dropout(0.5)',
       color: 'border-amber-500/50 text-amber-400',
-      summary: 'Task-specific multi-layer perceptron heads trained with Dropout and Adam optimizer to generate calibrated class probability vectors.',
+      summary: 'Task-specific single-hidden-layer heads (no BatchNorm) trained with Dropout(0.5) to generate calibrated class probability vectors.',
       details: {
-        'Layers': 'Dense(512, activation="relu") -> BatchNormalization -> Dropout(0.5) -> Dense(4, activation="softmax")',
-        'Loss Function': 'Categorical Cross-Entropy with label smoothing',
+        'Layers': 'Dense(hidden, activation="relu") -> Dropout(0.5) -> Dense(4, activation="softmax"); hidden=256 (Xception/VGG19/InceptionV3/IRV2), hidden=512 (VGG16 only)',
+        'Loss Function': 'Categorical Cross-Entropy (see training notebooks in Two class/ and Four class/)',
         'Output': '4-element calibrated probability distribution vector',
       },
-      codeSnippet: `x = Dense(512, activation='relu')(composite_features)\nx = BatchNormalization()(x)\nx = Dropout(0.5)(x)\noutput = Dense(4, activation='softmax')(x)`
+      codeSnippet: `# Actual deployed head (backend/model_service.py build_dense_head)\nx = Dense(hidden_dim, activation='relu')(composite_features)  # 256, or 512 for VGG16\nx = Dropout(0.5)(x)\noutput = Dense(4, activation='softmax')(x)  # no BatchNormalization`
     },
     {
       id: 'choquet',
@@ -194,7 +194,7 @@ export const ArchitectureSection: React.FC = () => {
       src: '/assets/Method Flowchart.png',
       fallback: 'Method Flowchart.png',
       title: 'Figure 1: Method Flowchart of the Proposed Framework',
-      desc: 'Complete overview schematic illustrating Macenko stain normalization, parallel deep feature extraction across 5 models, and Choquet fuzzy integral consensus.',
+      desc: 'Complete overview schematic illustrating Macenko stain normalization (training-time), parallel deep feature extraction across 5 models, and Choquet fuzzy integral consensus.',
     },
     {
       src: '/assets/VGG19.png',
@@ -388,16 +388,16 @@ export const ArchitectureSection: React.FC = () => {
               
               <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-mono font-bold text-indigo-400 uppercase">Stage 1: Early Flow</span>
-                  <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-500/30">728 Dims</span>
-                </div>
-                <h4 className="text-sm font-bold font-mono text-white">block4_sepconv1_act</h4>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  Tapped from entry flow. Preserves fine cellular cytology: nuclear chromatin borders, nuclear-to-cytoplasmic ratio, and basement membrane clarity.
-                </p>
-                <div className="p-2 rounded bg-slate-900 font-mono text-[11px] text-slate-400">
-                  GlobalAveragePooling2D() &rarr; 728
-                </div>
+                   <span className="text-[11px] font-mono font-bold text-indigo-400 uppercase">Stage 1: Early Flow</span>
+                   <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-500/30">256 Dims</span>
+                 </div>
+                 <h4 className="text-sm font-bold font-mono text-white">block4_sepconv1_act</h4>
+                 <p className="text-xs text-slate-300 leading-relaxed">
+                   Tapped from entry flow. Preserves fine cellular cytology: nuclear chromatin borders, nuclear-to-cytoplasmic ratio, and basement membrane clarity.
+                 </p>
+                 <div className="p-2 rounded bg-slate-900 font-mono text-[11px] text-slate-400">
+                   GlobalAveragePooling2D() &rarr; 256
+                 </div>
               </div>
 
               <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
@@ -416,16 +416,16 @@ export const ArchitectureSection: React.FC = () => {
 
               <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-mono font-bold text-amber-400 uppercase">Stage 3: Exit Flow</span>
-                  <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-500/30">1,064 Dims</span>
-                </div>
-                <h4 className="text-sm font-bold font-mono text-white">block14_sepconv1</h4>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  Tapped from final convolutional module. Captures macro-tissue semantics: stromal desmoplasia, angiogenesis, and infiltrative neoplastic nests.
-                </p>
-                <div className="p-2 rounded bg-slate-900 font-mono text-[11px] text-slate-400">
-                  GlobalAveragePooling2D() &rarr; 1064
-                </div>
+                   <span className="text-[11px] font-mono font-bold text-amber-400 uppercase">Stage 3: Exit Flow</span>
+                   <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-500/30">1,536 Dims</span>
+                 </div>
+                 <h4 className="text-sm font-bold font-mono text-white">block14_sepconv1</h4>
+                 <p className="text-xs text-slate-300 leading-relaxed">
+                   Tapped from final convolutional module. Captures macro-tissue semantics: stromal desmoplasia, angiogenesis, and infiltrative neoplastic nests.
+                 </p>
+                 <div className="p-2 rounded bg-slate-900 font-mono text-[11px] text-slate-400">
+                   GlobalAveragePooling2D() &rarr; 1536
+                 </div>
               </div>
 
             </div>

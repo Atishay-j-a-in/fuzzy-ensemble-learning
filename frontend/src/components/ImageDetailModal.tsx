@@ -293,7 +293,7 @@ export const ImageDetailModal: React.FC<ImageDetailModalProps> = ({ item, onClos
         {/* Modal Footer */}
         <div className="p-4 border-t border-slate-800 bg-slate-900/95 flex items-center justify-between">
           <span className="text-xs text-slate-400 font-mono">
-            ICIAR 2018 BACH Challenge &bull; Macenko Normalized
+            ICIAR 2018 BACH Challenge &bull; 512&times;512 RGB input (heads trained on Macenko-normalized data)
           </span>
           <button
             onClick={onClose}

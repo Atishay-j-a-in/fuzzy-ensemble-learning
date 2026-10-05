@@ -57,6 +57,37 @@ export interface BatchPredictionResponse {
   summary: BatchSummary;
 }
 
+// --- Live progress polling (additive; old payloads unchanged) ---
+export type JobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface JobStatus {
+  job_id: string;
+  kind: string;
+  status: JobState;
+  stage: string;
+  current: number;
+  total: number;
+  percent: number;
+  current_image?: string | null;
+  current_model?: string | null;
+  message?: string;
+  mode?: string;
+  result?: BatchPredictionResponse | null;
+  error?: string | null;
+  updated_at?: string;
+}
+
+export interface StartupStatus {
+  stage: string;
+  stage_index: number;
+  stage_total: number;
+  current_model?: string | null;
+  message?: string;
+  done: boolean;
+  error?: string | null;
+  updated_at?: string;
+}
+
 export interface ModelInfo {
   architecture: string;
   backbones?: Array<{

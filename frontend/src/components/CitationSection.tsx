@@ -10,7 +10,7 @@ export const CitationSection: React.FC = () => {
   journal={Expert Systems with Applications},
   volume={190},
   pages={116167},
-  year={2021},
+  year={2022},
   publisher={Elsevier},
   doi={10.1016/j.eswa.2021.116167}
 }`;

@@ -7,7 +7,8 @@ import { BenchmarksSection } from './components/BenchmarksSection';
 import { CitationSection } from './components/CitationSection';
 import { Footer } from './components/Footer';
 import { ImageDetailModal } from './components/ImageDetailModal';
-import { BatchPredictionResponse, PredictionItem, ModelInfo } from './types';
+import { BatchPredictionResponse, PredictionItem, ModelInfo, StartupStatus } from './types';
+import { useJobPolling } from './hooks/useJobPolling';
 
 export function App() {
   const [backendHealthy, setBackendHealthy] = useState<boolean>(false);
@@ -17,13 +18,61 @@ export function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'studio' | 'results' | 'architecture' | 'benchmarks' | 'citation'>('studio');
   const [inferenceMode, setInferenceMode] = useState<'ensemble' | 'xception'>('ensemble');
+  const [demoJobId, setDemoJobId] = useState<string | null>(null);
+  const [demoError, setDemoError] = useState<string | null>(null);
+  const [startupStatus, setStartupStatus] = useState<StartupStatus | null>(null);
+  const { job: demoJob, error: demoPollError, cancel: cancelDemoJob } = useJobPolling(demoJobId);
 
   useEffect(() => {
     checkHealth();
     fetchModelInfo();
     // Load initial 10 test samples
     loadDemoBatch(10);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Poll cold-start progress while the backend reports degraded/offline.
+  useEffect(() => {
+    if (backendHealthy) return;
+    let stopped = false;
+    const fetchStartup = async () => {
+      try {
+        const res = await fetch('/api/startup/progress');
+        if (res.ok) {
+          const data: StartupStatus = await res.json();
+          if (!stopped) setStartupStatus(data);
+        }
+      } catch {
+        /* backend may not be up yet — Navbar keeps showing Offline */
+      }
+    };
+    void fetchStartup();
+    const timer = window.setInterval(fetchStartup, 2000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [backendHealthy]);
+
+  // Complete async demo/sample-dataset jobs.
+  useEffect(() => {
+    if (!demoJobId || !demoJob) return;
+    if (demoJob.status === 'succeeded' && demoJob.result) {
+      setPredictionData(demoJob.result);
+      setDemoError(null);
+      setActiveTab('results');
+      setIsLoading(false);
+      setDemoJobId(null);
+    } else if (demoJob.status === 'failed') {
+      console.error('Demo job failed:', demoJob.error);
+      setDemoError(demoJob.error || 'Sample-dataset job failed on the backend.');
+      setIsLoading(false);
+      setDemoJobId(null);
+    } else if (demoJob.status === 'cancelled') {
+      setIsLoading(false);
+      setDemoJobId(null);
+    }
+  }, [demoJob, demoJobId]);
 
   const checkHealth = async () => {
     try {
@@ -51,7 +100,36 @@ export function App() {
 
   const loadDemoBatch = async (limit: number = 10) => {
     setIsLoading(true);
+    setDemoJobId(null);
+    setDemoError(null);
     try {
+      // Preferred path: async job + live polling.
+      try {
+        const asyncRes = await fetch(
+          `/api/predict/sample-dataset/async?limit=${limit}&offset=0&mode=${inferenceMode}`,
+          { method: 'POST' }
+        );
+        if (asyncRes.ok) {
+          const { job_id } = await asyncRes.json();
+          setDemoJobId(job_id);
+          return; // completion handled by the demo-job effect above
+        }
+        if (asyncRes.status === 404) {
+          // Sample dataset missing on the server — surface it instead of failing silently.
+          const err = await asyncRes.json().catch(() => ({ detail: 'Sample dataset not found on server.' }));
+          throw new Error(err.detail || 'Sample dataset not found on server.');
+        }
+        // Other non-OK (old backend): fall through to legacy sync endpoint.
+      } catch (e: any) {
+        if (e?.message && !e.message.includes('Failed to fetch')) {
+          // Backend answered with a real error (e.g. missing dataset): show it.
+          setDemoError(`${e.message} Upload your own images instead, or add test*.tif files under ICIAR2018_BACH_Challenge_TestDataset/Photos/.`);
+          setIsLoading(false);
+          return;
+        }
+        // Network failure of /async: fall through to legacy sync endpoint.
+      }
+
       const res = await fetch(`/api/predict/sample-dataset?limit=${limit}&offset=0&mode=${inferenceMode}`, {
         method: 'POST',
       });
@@ -59,10 +137,14 @@ export function App() {
         const data: BatchPredictionResponse = await res.json();
         setPredictionData(data);
         setActiveTab('results');
+      } else {
+        const err = await res.json().catch(() => ({ detail: 'Sample dataset request failed' }));
+        throw new Error(err.detail || 'Sample dataset request failed.');
       }
-    } catch (err) {
+      setIsLoading(false);
+    } catch (err: any) {
       console.error('Error loading demo batch:', err);
-    } finally {
+      setDemoError(`${err?.message || 'Could not run sample dataset.'} Upload your own images instead, or add test*.tif files under ICIAR2018_BACH_Challenge_TestDataset/Photos/.`);
       setIsLoading(false);
     }
   };
@@ -83,6 +165,7 @@ export function App() {
         resultCount={predictionData?.items.length || 0}
         inferenceMode={inferenceMode}
         setInferenceMode={setInferenceMode}
+        startupStatus={startupStatus}
       />
 
       {/* Main Tab Content */}
@@ -97,6 +180,10 @@ export function App() {
             onLoadDemo={loadDemoBatch}
             inferenceMode={inferenceMode}
             setInferenceMode={setInferenceMode}
+            demoJob={demoJob}
+            demoPollError={demoPollError}
+            onCancelDemoJob={cancelDemoJob}
+            demoError={demoError}
           />
         )}
 
